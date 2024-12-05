@@ -6,34 +6,61 @@ from typing import List, Tuple
 
 def get_r_function_content(owner: str, repo: str, function_num: int) -> str:
     """Fetch the content of an R function file from GitHub."""
-    # Format number with leading zeros
     padded_num = str(function_num).zfill(4)
     filename = f"data{padded_num}.R"
     
-    # Use requests to get the raw content
     url = f"https://raw.githubusercontent.com/{owner}/{repo}/main/R/data/{filename}"
     response = requests.get(url)
     if response.status_code == 404:
         return None
     return response.text
 
-def extract_download_urls(r_content: str) -> List[Tuple[str, str]]:
+def extract_download_info(r_content: str) -> List[Tuple[str, str]]:
     """Extract download URLs and their associated filenames from R function content."""
     if not r_content:
         return []
     
-    # Pattern to match download.file() calls
-    # This handles both single quotes and double quotes
-    pattern = r"download\.file\(([\'\"])(.*?)\1.*?destfile\s*=\s*.*?([\'\"])(.*?)\3"
-    matches = re.finditer(pattern, r_content, re.DOTALL)
+    downloads = []
     
-    urls = []
-    for match in matches:
-        url = match.group(2)
-        filename = os.path.basename(match.group(4).replace("paste0(folder, '", "").replace("')", ""))
-        urls.append((url, filename))
+    # First, find all variable assignments containing URLs
+    # This pattern looks for variable assignments with URLs in them
+    url_vars_pattern = r"(\w+)\s*<-\s*c\((.*?)\)"
+    url_vars_matches = re.finditer(url_vars_pattern, r_content, re.DOTALL)
     
-    return urls
+    url_vars = {}
+    for match in url_vars_matches:
+        var_name = match.group(1)
+        # Extract URLs from the c(...) content
+        urls = re.findall(r"['\"]((https?://|ftp://)[^'\"]+)['\"]", match.group(2))
+        if urls:
+            url_vars[var_name] = [url[0] for url in urls]  # url[0] because re.findall returns tuples for groups
+    
+    # Now find download.file calls and match them with the URLs
+    download_pattern = r"download\.file\((.*?)\[(\d+)\].*?destfile\s*=\s*.*?['\"](.*?)['\"]"
+    download_matches = re.finditer(download_pattern, r_content, re.DOTALL)
+    
+    for match in download_matches:
+        var_name = match.group(1).strip()
+        index = int(match.group(2)) - 1  # R uses 1-based indexing
+        filename = os.path.basename(match.group(3).replace("paste0(folder, '", "").replace("')", ""))
+        
+        if var_name in url_vars and index < len(url_vars[var_name]):
+            downloads.append((url_vars[var_name][index], filename))
+    
+    # Also look for direct URL downloads (not using variables)
+    direct_pattern = r"download\.file\(['\"](https?://[^'\"]+)['\"]"
+    direct_matches = re.finditer(direct_pattern, r_content, re.DOTALL)
+    
+    for match in direct_matches:
+        url = match.group(1)
+        # Look for the corresponding destfile
+        destfile_pattern = f"download\.file\(['\"]({re.escape(url)})['\"].*?destfile\s*=\s*.*?['\"](.*?)['\"]"
+        destfile_match = re.search(destfile_pattern, r_content, re.DOTALL)
+        if destfile_match:
+            filename = os.path.basename(destfile_match.group(2).replace("paste0(folder, '", "").replace("')", ""))
+            downloads.append((url, filename))
+    
+    return downloads
 
 def download_file(url: str, folder: Path, filename: str) -> bool:
     """Download a file from URL to specified folder."""
@@ -55,7 +82,7 @@ def main():
     # Configuration
     owner = "jc9677"
     repo = "ceanav"
-    base_folder = Path("downloads")  # Change this to your desired base folder
+    base_folder = Path("downloads")
     
     # Create base folder if it doesn't exist
     base_folder.mkdir(exist_ok=True)
@@ -73,13 +100,13 @@ def main():
         dataset_folder.mkdir(exist_ok=True)
         
         # Extract and download URLs
-        urls = extract_download_urls(r_content)
-        if not urls:
+        downloads = extract_download_info(r_content)
+        if not downloads:
             print(f"No download URLs found in data{str(i).zfill(4)}.R")
             continue
             
         print(f"\nProcessing data{str(i).zfill(4)}:")
-        for url, filename in urls:
+        for url, filename in downloads:
             print(f"  Downloading {filename} from {url}")
             success = download_file(url, dataset_folder, filename)
             if success:
